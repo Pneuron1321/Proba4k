@@ -124,44 +124,54 @@ function слои(c, w, h, t){
 }
 
 async function probaComp(video){
-  /* МЕРЯЕМ МИЛЛИСЕКУНДЫ РАБОТЫ, А НЕ ЧАСТОТУ ЭКРАНА.
-     Первый замер на телефоне дал 27 · 27 · 26 на 1080p, 1440p и 4К — плоско,
-     хотя пикселей вчетверо больше. Это не отрисовка: как только композит
-     перестаёт укладываться в 16 мс, браузер отдаёт каждый второй кадр, и всё
-     подряд показывает около 30. Теперь секундомер стоит ВОКРУГ САМОЙ РАБОТЫ,
-     а холст остаётся в разметке, чтобы браузер не имел права её пропустить. */
+  /* ТРЕТЬЯ ПОПЫТКА, И ПРИЧИНА ДВУХ ПРЕДЫДУЩИХ ПРОВАЛОВ.
+     На телефоне вышло ровно 40 мс от 720p до 4К при девятикратной разнице в
+     пикселях. Виноват был слив: getImageData на iOS ждёт, пока GPU догонит и
+     вернёт данные в процессор, и это фиксированный простой, не зависящий от
+     того, что читается один пиксель. Мерился секундомер, а не работа.
+     Теперь слив ОДИН на весь пакет, и его собственная цена меряется отдельно
+     и вычитается. Если она окажется большой — будет видно прямо в таблице. */
   let html = '<table><tr><th>ступень</th><th>мс/кадр</th><th>к/с</th><th>вердикт</th></tr>';
   const cv = document.createElement('canvas');
   cv.style.cssText = 'width:100%;max-width:260px;height:auto;border-radius:8px;'
                    + 'border:1px solid var(--line);display:block;margin-top:8px';
   $('comp').parentNode.appendChild(cv);
   const c = cv.getContext('2d', { alpha: false });
+  const N = 30;
+  let базаОбщая = 0;
   for (const [имя, w, h] of STUPENI){
     cv.width = w; cv.height = h;
-    const мс = await new Promise(готово => {
-      let n = 0, сумма = 0, кадров = 0;
-      const шаг = () => {
-        const t0 = performance.now();
-        c.drawImage(video, 0, 0, w, h);
-        слои(c, w, h, n);
-        c.getImageData(0, 0, 1, 1);              // слив: дождаться настоящего конца работы
-        const dt = performance.now() - t0;
-        n++;
-        if (n > 5){ сумма += dt; кадров++; }     // первые пять — разогрев
-        if (кадров < 40) requestAnimationFrame(шаг);
-        else готово(сумма / кадров);
-      };
-      requestAnimationFrame(шаг);
-    });
-    const fps = Math.min(60, Math.round(1000 / мс));
+    for (let i = 0; i < 6; i++){ c.drawImage(video, 0, 0, w, h); слои(c, w, h, i); }
+    c.getImageData(0, 0, 1, 1);                       // разогрев
+    await new Promise(r => requestAnimationFrame(r));
+
+    /* цена самого слива на этом размере холста */
+    const b0 = performance.now();
+    for (let i = 0; i < 4; i++) c.getImageData(0, 0, 1, 1);
+    const база = (performance.now() - b0) / 4;
+    базаОбщая = Math.max(базаОбщая, база);
+
+    /* работа: N композитов, слив один раз в конце */
+    const t0 = performance.now();
+    for (let i = 0; i < N; i++){
+      c.drawImage(video, 0, 0, w, h);
+      слои(c, w, h, i);
+    }
+    c.getImageData(0, 0, 1, 1);
+    const мс = Math.max(0.05, (performance.now() - t0 - база) / N);
+
+    const fps = Math.min(120, Math.round(1000 / мс));
     const кл = мс <= 16.7 ? 'y' : мс <= 33 ? 'm' : 'n';
     const v = мс <= 16.7 ? 'тянет 60' : мс <= 28 ? 'тянет 30' : мс <= 33 ? 'на грани 30' : 'не тянет 30';
     html += '<tr><td>' + имя + '</td><td class="' + кл + '">' + мс.toFixed(1) +
             '</td><td>' + fps + '</td><td class="' + кл + '">' + v + '</td></tr>';
     строка('  композит ' + имя.padEnd(6) + мс.toFixed(1) + ' мс/кадр · до ' + fps + ' к/с · ' + v);
-    $('comp').innerHTML = html + '</table>';
+    $('comp').innerHTML = html + '</table>'
+      + '<div style="color:var(--dim);font-size:11px;margin-top:6px">цена самого замера '
+      + '(ожидание GPU): ' + базаОбщая.toFixed(1) + ' мс — она вычтена</div>';
     await new Promise(r => setTimeout(r, 200));
   }
+  строка('  цена самого замера (ожидание GPU): ' + базаОбщая.toFixed(1) + ' мс, вычтена');
   cv.remove();
 }
 
