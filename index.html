@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>ЗАМЕР 4К</title>
+<style>
+  :root{ --bg:#0B0F14; --pane:#131A22; --line:#243040; --ink:#E8E3D8;
+         --dim:#8A94A3; --hot:#FFD166; --ok:#7ED8A0; --no:#FF5D45; }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body{ margin:0; padding:16px 14px 40px; background:var(--bg); color:var(--ink);
+        font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
+  h1{ font-size:16px; letter-spacing:.14em; margin:0 0 4px; }
+  .sub{ color:var(--dim); font-size:13px; margin-bottom:16px; }
+  .pane{ background:var(--pane); border:1px solid var(--line); border-radius:16px;
+         padding:13px; margin-bottom:12px; }
+  .pane h2{ font-size:11px; letter-spacing:.16em; color:var(--dim); margin:0 0 10px; font-weight:700; }
+  button{ font:700 15px/1 inherit; color:#0B0F14; background:var(--hot);
+          border:0; border-radius:12px; padding:14px 16px; width:100%; }
+  button:disabled{ opacity:.45; }
+  table{ width:100%; border-collapse:collapse; font-size:13px;
+         font-variant-numeric:tabular-nums; }
+  td,th{ text-align:left; padding:5px 4px; border-bottom:1px solid var(--line); }
+  th{ color:var(--dim); font-weight:600; font-size:11px; letter-spacing:.08em; }
+  .y{ color:var(--ok); } .n{ color:var(--no); } .m{ color:var(--hot); }
+  #log{ font:12px/1.6 ui-monospace,Menlo,monospace; color:var(--dim); white-space:pre-wrap; }
+  #out{ width:100%; height:110px; background:#0F151C; color:var(--ink);
+        border:1px solid var(--line); border-radius:10px; font:11px/1.4 ui-monospace,monospace;
+        padding:8px; margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>ЗАМЕР 4К · СКРИН-СТУДИЯ</h1>
+<div class="sub">Две пробы на этом телефоне: возьмётся ли аппаратный кодировщик
+за каждую ступень и с какой скоростью рисуется композит. Ничего никуда не шлёт.</div>
+
+<div class="pane">
+  <h2>ПРОБА</h2>
+  <button id="go">ЗАПУСТИТЬ · нужен доступ к камере</button>
+  <div id="log" style="margin-top:10px">камера нужна, чтобы мерить настоящую нагрузку, а не пустой холст.</div>
+</div>
+
+<div class="pane"><h2>1 · КОДИРОВЩИК (WebCodecs)</h2>
+  <div id="enc"><span class="dim">—</span></div></div>
+
+<div class="pane"><h2>2 · КОМПОЗИТ (кадров в секунду)</h2>
+  <div id="comp"><span class="dim">—</span></div></div>
+
+<div class="pane"><h2>ОТЧЁТ · скопируй и пришли</h2>
+  <textarea id="out" readonly></textarea></div>
+
+<script>
+const $ = i => document.getElementById(i);
+const STUPENI = [
+  ['720p', 1280, 720], ['900p', 1600, 900], ['1080p', 1920, 1080],
+  ['1440p', 2560, 1440], ['4K', 3840, 2160]
+];
+const KBPS = { '720p':2800, '900p':4000, '1080p':6000, '1440p':9000, '4K':14000 };
+let otchet = [];
+const log = t => { $('log').textContent = t; };
+const строка = t => { otchet.push(t); $('out').value = otchet.join('\n'); };
+
+/* ── 1 · кодировщик ─────────────────────────────────────────────────── */
+async function probaEnc(){
+  if (typeof VideoEncoder === 'undefined'){
+    $('enc').innerHTML = '<span class="n">VideoEncoder нет вовсе — WebCodecs не поддержан</span>';
+    строка('кодировщик: НЕТ (VideoEncoder отсутствует)');
+    return;
+  }
+  строка('кодировщик: VideoEncoder есть' +
+         (typeof AudioEncoder === 'undefined' ? ', AudioEncoder НЕТ (звук — сырым PCM)' : ', AudioEncoder тоже есть'));
+  let html = '<table><tr><th>ступень</th><th>аппаратно</th><th>любой</th></tr>';
+  for (const [имя, w, h] of STUPENI){
+    const общ = { codec: 'avc1.640034', width: w, height: h,
+                  bitrate: KBPS[имя] * 1000, framerate: 30 };
+    let hw = false, any = false;
+    try{ hw = (await VideoEncoder.isConfigSupported(
+            Object.assign({ hardwareAcceleration: 'prefer-hardware' }, общ))).supported; }catch(e){}
+    try{ any = (await VideoEncoder.isConfigSupported(общ)).supported; }catch(e){}
+    html += '<tr><td>' + имя + '</td><td class="' + (hw?'y':'n') + '">' + (hw?'да':'нет') +
+            '</td><td class="' + (any?'y':'n') + '">' + (any?'да':'нет') + '</td></tr>';
+    строка('  ' + имя.padEnd(6) + ' аппаратно ' + (hw?'да':'нет') + ' · любой ' + (any?'да':'нет'));
+  }
+  $('enc').innerHTML = html + '</table>';
+}
+
+/* ── 2 · композит ───────────────────────────────────────────────────── */
+/* Рисуем то же, что рисует студия: кадр камеры во весь холст, поверх —
+   пять слоёв с дугами, обводкой и текстом. Пустой холст мерить бессмысленно. */
+function слои(c, w, h, t){
+  c.save();
+  c.globalAlpha = .9;
+  const R = Math.min(w, h) * 0.16, cx = w * 0.16, cy = h * 0.74;
+  c.beginPath(); c.arc(cx, cy, R, 0, 6.283); c.fillStyle = 'rgba(4,7,16,.97)'; c.fill();
+  c.strokeStyle = 'rgba(224,205,160,.9)'; c.lineWidth = Math.max(1, w * .0012);
+  for (let d = 0; d < 360; d += 5){
+    const r = d * Math.PI / 180, tl = (d % 90 ? .03 : .075) * R * 2;
+    c.beginPath();
+    c.moveTo(cx + Math.sin(r) * (R - tl), cy - Math.cos(r) * (R - tl));
+    c.lineTo(cx + Math.sin(r) * R, cy - Math.cos(r) * R);
+    c.stroke();
+  }
+  const fs = Math.max(12, h * .03);
+  c.font = '700 ' + fs + 'px ui-monospace,Menlo,monospace';
+  c.lineWidth = fs * .28; c.strokeStyle = 'rgba(10,10,10,.85)';
+  c.fillStyle = 'rgba(224,205,160,.92)';
+  for (let i = 0; i < 5; i++){
+    const s = ['ВОЛНА ПОШЛА', '18.4 км/ч', 'N 45.08 E 13.63', 'налёт 2:14', 'ЭФИР'][i];
+    c.strokeText(s, w * .04, h * (.08 + i * .07));
+    c.fillText(s, w * .04, h * (.08 + i * .07));
+  }
+  c.globalAlpha = .55;
+  c.fillStyle = '#FFD166';
+  c.fillRect(w * .7, h * .06 + (t % 20), w * .24, h * .04);
+  c.restore();
+}
+
+async function probaComp(video){
+  /* ЧЕСТНЫЙ ЗАМЕР — как работает студия, а не как удобно секундомеру.
+     Прошлые две попытки врали: отсоединённый холст браузер имеет право не
+     рисовать вовсе, и 4К выходило быстрее 720p. Теперь холст в разметке и
+     кадры считаются циклом экрана — ровно то, что делает композит эфира.
+     Потолок 60 — это частота экрана, а не предел; нам важно только ≥30. */
+  let html = '<table><tr><th>ступень</th><th>к/с</th><th>вердикт</th></tr>';
+  const cv = document.createElement('canvas');
+  cv.style.cssText = 'width:100%;max-width:260px;height:auto;border-radius:8px;'
+                   + 'border:1px solid var(--line);display:block;margin-top:8px';
+  $('comp').parentNode.appendChild(cv);
+  const c = cv.getContext('2d', { alpha: false });
+  for (const [имя, w, h] of STUPENI){
+    cv.width = w; cv.height = h;
+    const fps = await new Promise(готово => {
+      let n = 0, старт = 0;
+      const шаг = t => {
+        if (!старт) старт = t;
+        c.drawImage(video, 0, 0, w, h);
+        слои(c, w, h, n);
+        n++;
+        if (t - старт < 2000) requestAnimationFrame(шаг);
+        else готово(Math.round(n * 1000 / (t - старт)));
+      };
+      requestAnimationFrame(шаг);
+    });
+    const кл = fps >= 29 ? 'y' : fps >= 22 ? 'm' : 'n';
+    const v = fps >= 29 ? 'тянет 30' : fps >= 22 ? 'на грани' : 'не тянет';
+    html += '<tr><td>' + имя + '</td><td class="' + кл + '">' + fps + '</td><td class="' + кл + '">' + v + '</td></tr>';
+    строка('  композит ' + имя.padEnd(6) + fps + ' к/с · ' + v);
+    $('comp').innerHTML = html + '</table>';
+    await new Promise(r => setTimeout(r, 200));
+  }
+  cv.remove();
+}
+
+$('go').onclick = async () => {
+  $('go').disabled = true;
+  otchet = []; $('out').value = '';
+  строка('ЗАМЕР 4К · ' + new Date().toISOString().slice(0, 16).replace('T', ' '));
+  строка('устройство: ' + navigator.userAgent);
+  строка('экран: ' + screen.width + '×' + screen.height + ' @' + (devicePixelRatio || 1));
+  строка('');
+  log('спрашиваю камеру…');
+  let st;
+  try{
+    st = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } },
+      audio: false });
+  }catch(e){
+    log('камера не дана: ' + e.message + ' — композит мерить нечем');
+    строка('камера: ОТКАЗ (' + e.message + ')');
+    await probaEnc();
+    $('go').disabled = false;
+    return;
+  }
+  const tr = st.getVideoTracks()[0], s = tr.getSettings();
+  строка('камера отдала: ' + s.width + '×' + s.height + ' @' + (s.frameRate || '?') + ' к/с');
+  log('камера: ' + s.width + '×' + s.height + ' — мерю кодировщик…');
+  const v = document.createElement('video');
+  v.srcObject = st; v.muted = true; v.playsInline = true;
+  await v.play();
+  await probaEnc();
+  log('мерю композит… телефон будет греться, это нормально');
+  строка('');
+  await probaComp(v);
+  строка('');
+  строка('КОНЕЦ ЗАМЕРА');
+  tr.stop();
+  log('готово. Скопируй отчёт снизу и пришли.');
+  $('go').disabled = false;
+};
+</script>
+</body>
+</html>
