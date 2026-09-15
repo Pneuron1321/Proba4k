@@ -43,6 +43,14 @@
 <div class="pane"><h2>1 · КОДИРОВЩИК (WebCodecs)</h2>
   <div id="enc"><span class="dim">—</span></div></div>
 
+<div class="pane"><h2>КАМЕРА</h2>
+  <select id="cam" style="width:100%;padding:12px;border-radius:10px;background:#1A2430;
+    color:var(--ink);border:1px solid var(--line);font:600 14px inherit">
+    <option>— запусти пробу, список появится —</option></select>
+  <div class="sub" style="margin:8px 0 0">Выбрал другую — жми ПЕРЕМЕРИТЬ. Нужна ЗАДНЯЯ:
+    передняя 4К не умеет, и нагрузка выходит ниже настоящей.</div>
+  <button id="again" style="margin-top:10px" disabled>ПЕРЕМЕРИТЬ КОМПОЗИТ</button></div>
+
 <div class="pane"><h2>2 · КОМПОЗИТ (кадров в секунду)</h2>
   <div id="comp"><span class="dim">—</span></div></div>
 
@@ -116,12 +124,13 @@ function слои(c, w, h, t){
 }
 
 async function probaComp(video){
-  /* ЧЕСТНЫЙ ЗАМЕР — как работает студия, а не как удобно секундомеру.
-     Прошлые две попытки врали: отсоединённый холст браузер имеет право не
-     рисовать вовсе, и 4К выходило быстрее 720p. Теперь холст в разметке и
-     кадры считаются циклом экрана — ровно то, что делает композит эфира.
-     Потолок 60 — это частота экрана, а не предел; нам важно только ≥30. */
-  let html = '<table><tr><th>ступень</th><th>к/с</th><th>вердикт</th></tr>';
+  /* МЕРЯЕМ МИЛЛИСЕКУНДЫ РАБОТЫ, А НЕ ЧАСТОТУ ЭКРАНА.
+     Первый замер на телефоне дал 27 · 27 · 26 на 1080p, 1440p и 4К — плоско,
+     хотя пикселей вчетверо больше. Это не отрисовка: как только композит
+     перестаёт укладываться в 16 мс, браузер отдаёт каждый второй кадр, и всё
+     подряд показывает около 30. Теперь секундомер стоит ВОКРУГ САМОЙ РАБОТЫ,
+     а холст остаётся в разметке, чтобы браузер не имел права её пропустить. */
+  let html = '<table><tr><th>ступень</th><th>мс/кадр</th><th>к/с</th><th>вердикт</th></tr>';
   const cv = document.createElement('canvas');
   cv.style.cssText = 'width:100%;max-width:260px;height:auto;border-radius:8px;'
                    + 'border:1px solid var(--line);display:block;margin-top:8px';
@@ -129,26 +138,92 @@ async function probaComp(video){
   const c = cv.getContext('2d', { alpha: false });
   for (const [имя, w, h] of STUPENI){
     cv.width = w; cv.height = h;
-    const fps = await new Promise(готово => {
-      let n = 0, старт = 0;
-      const шаг = t => {
-        if (!старт) старт = t;
+    const мс = await new Promise(готово => {
+      let n = 0, сумма = 0, кадров = 0;
+      const шаг = () => {
+        const t0 = performance.now();
         c.drawImage(video, 0, 0, w, h);
         слои(c, w, h, n);
+        c.getImageData(0, 0, 1, 1);              // слив: дождаться настоящего конца работы
+        const dt = performance.now() - t0;
         n++;
-        if (t - старт < 2000) requestAnimationFrame(шаг);
-        else готово(Math.round(n * 1000 / (t - старт)));
+        if (n > 5){ сумма += dt; кадров++; }     // первые пять — разогрев
+        if (кадров < 40) requestAnimationFrame(шаг);
+        else готово(сумма / кадров);
       };
       requestAnimationFrame(шаг);
     });
-    const кл = fps >= 29 ? 'y' : fps >= 22 ? 'm' : 'n';
-    const v = fps >= 29 ? 'тянет 30' : fps >= 22 ? 'на грани' : 'не тянет';
-    html += '<tr><td>' + имя + '</td><td class="' + кл + '">' + fps + '</td><td class="' + кл + '">' + v + '</td></tr>';
-    строка('  композит ' + имя.padEnd(6) + fps + ' к/с · ' + v);
+    const fps = Math.min(60, Math.round(1000 / мс));
+    const кл = мс <= 16.7 ? 'y' : мс <= 33 ? 'm' : 'n';
+    const v = мс <= 16.7 ? 'тянет 60' : мс <= 28 ? 'тянет 30' : мс <= 33 ? 'на грани 30' : 'не тянет 30';
+    html += '<tr><td>' + имя + '</td><td class="' + кл + '">' + мс.toFixed(1) +
+            '</td><td>' + fps + '</td><td class="' + кл + '">' + v + '</td></tr>';
+    строка('  композит ' + имя.padEnd(6) + мс.toFixed(1) + ' мс/кадр · до ' + fps + ' к/с · ' + v);
     $('comp').innerHTML = html + '</table>';
     await new Promise(r => setTimeout(r, 200));
   }
   cv.remove();
+}
+
+/* ДОБЫТЬ КАМЕРУ. exact, а не ideal: мягкое пожелание Safari вправе не
+   исполнить, и первый замер на телефоне ушёл на переднюю камеру, которая
+   4К не умеет вовсе. Не вышло exact — честно откатываемся и говорим об этом. */
+let поток = null;
+async function vzyat(deviceId){
+  if (поток) поток.getTracks().forEach(t => t.stop());
+  const размер = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } };
+  const попытки = deviceId
+    ? [Object.assign({ deviceId: { exact: deviceId } }, размер)]
+    : [Object.assign({ facingMode: { exact: 'environment' } }, размер),
+       Object.assign({ facingMode: { ideal: 'environment' } }, размер),
+       размер];
+  let беда = null;
+  for (const v of попытки){
+    try{ поток = await navigator.mediaDevices.getUserMedia({ video: v, audio: false }); return поток; }
+    catch(e){ беда = e; }
+  }
+  throw беда;
+}
+
+async function spisokKamer(){
+  try{
+    const ds = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const текущ = поток && поток.getVideoTracks()[0].getSettings().deviceId;
+    $('cam').innerHTML = '';
+    ds.forEach((d, i) => {
+      const o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || ('камера ' + (i + 1));
+      if (d.deviceId === текущ) o.selected = true;
+      $('cam').appendChild(o);
+    });
+    $('again').disabled = ds.length < 2;
+  }catch(e){}
+}
+
+$('again').onclick = async () => {
+  $('again').disabled = true; $('go').disabled = true;
+  try{
+    await vzyat($('cam').value);
+    const s = поток.getVideoTracks()[0].getSettings();
+    строка('');
+    строка('ПЕРЕМЕР · камера: ' + s.width + '×' + s.height + ' @' + (s.frameRate || '?'));
+    const v = document.createElement('video');
+    v.srcObject = поток; v.muted = true; v.playsInline = true; await v.play();
+    pokazKamery(s);
+    log('мерю композит заново…');
+    await probaComp(v);
+    строка('КОНЕЦ ПЕРЕМЕРА');
+    log('готово.');
+  }catch(e){ log('не вышло взять эту камеру: ' + e.message); }
+  $('again').disabled = false; $('go').disabled = false;
+};
+
+function pokazKamery(s){
+  $('comp').innerHTML = '<div style="color:var(--dim);font-size:12px">камера: <b class="m">'
+    + s.width + '×' + s.height + '</b> @' + (s.frameRate || '?') + ' · ' + (s.facingMode || 'сторона не названа')
+    + (s.width < 2000 ? ' — <span class="n">меньше 4К: кадр растягивается, нагрузка ниже настоящей</span>' : '')
+    + '</div>';
 }
 
 $('go').onclick = async () => {
@@ -161,9 +236,7 @@ $('go').onclick = async () => {
   log('спрашиваю камеру…');
   let st;
   try{
-    st = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } },
-      audio: false });
+    st = await vzyat(null);
   }catch(e){
     log('камера не дана: ' + e.message + ' — композит мерить нечем');
     строка('камера: ОТКАЗ (' + e.message + ')');
@@ -172,7 +245,12 @@ $('go').onclick = async () => {
     return;
   }
   const tr = st.getVideoTracks()[0], s = tr.getSettings();
-  строка('камера отдала: ' + s.width + '×' + s.height + ' @' + (s.frameRate || '?') + ' к/с');
+  if (s.facingMode && s.facingMode !== 'environment')
+    строка('ВНИМАНИЕ: досталась камера «' + s.facingMode + '», не задняя — выбери в списке и перемерь');
+  строка('камера отдала: ' + s.width + '×' + s.height + ' @' + (s.frameRate || '?') + ' к/с'
+         + ' · ' + (s.facingMode || 'сторона не названа'));
+  pokazKamery(s);
+  await spisokKamer();
   log('камера: ' + s.width + '×' + s.height + ' — мерю кодировщик…');
   const v = document.createElement('video');
   v.srcObject = st; v.muted = true; v.playsInline = true;
